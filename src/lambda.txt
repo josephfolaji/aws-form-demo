@@ -1,0 +1,95 @@
+import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
+import {
+  DynamoDBDocumentClient,
+  ScanCommand,
+  PutCommand,
+  GetCommand,
+  DeleteCommand,
+} from "@aws-sdk/lib-dynamodb";
+// Import crypto for UUID generation
+import crypto from "crypto";
+
+const client = new DynamoDBClient({});
+const dynamo = DynamoDBDocumentClient.from(client);
+const tableName = "Form-Submission";  // DynamoDB table name (with primary key ID or id)
+
+export const handler = async (event) => {
+  let body;
+  let statusCode = 200;
+  const headers = {
+    "Content-Type": "application/json",
+    // CORS headers to allow web browsers to call this API:
+    "Access-Control-Allow-Origin": "*",            // allow all origins
+    "Access-Control-Allow-Methods": "GET,POST,PUT,DELETE",
+    "Access-Control-Allow-Headers": "Content-Type"
+  };
+
+  try {
+    switch (event.routeKey) {
+      case "DELETE /items/{id}":
+        await dynamo.send(new DeleteCommand({
+          TableName: tableName,
+          Key: { id: event.pathParameters.id }  // using "ID" as the key name
+        }));
+        body = `Deleted item ${event.pathParameters.id}`;
+        break;
+
+      case "GET /items/{id}":
+        const getResult = await dynamo.send(new GetCommand({
+          TableName: tableName,
+          Key: { id: event.pathParameters.id }
+        }));
+        body = getResult.Item || {};  // if not found, return empty object 
+        break;
+
+      case "GET /items":
+        const scanResult = await dynamo.send(new ScanCommand({ TableName: tableName }));
+        body = scanResult.Items || [];
+        break;
+
+      case "PUT /items":
+        const requestJSON = JSON.parse(event.body);
+        const isNew = !requestJSON.id;               // if no id provided, it's a new item
+        const itemId = isNew ? crypto.randomUUID() : requestJSON.id;  // generate UUID if new
+        const now = new Date().toISOString();
+
+        // If updating an existing item, preserve its original createdAt
+        let createdAt = now;
+        if (!isNew) {
+          const existing = await dynamo.send(new GetCommand({
+            TableName: tableName,
+            Key: { id: itemId }  // use the same key name "ID"
+          }));
+          if (existing.Item && existing.Item.createdAt) {
+            createdAt = existing.Item.createdAt;
+          }
+        }
+
+        // Prepare the item to put
+        const item = {
+          id: itemId,
+          name: requestJSON.name,
+          email: requestJSON.email,
+          createdAt: createdAt,
+          updatedAt: now
+        };
+
+        await dynamo.send(new PutCommand({
+          TableName: tableName,
+          Item: item
+        }));
+        body = { message: `Saved item ${itemId}`, item };  // respond with some info
+        break;
+
+      default:
+        throw new Error(`Unsupported route: "${event.routeKey}"`);
+    }
+  } catch (err) {
+    statusCode = 400;
+    body = { error: err.message };
+  } finally {
+    body = JSON.stringify(body);
+  }
+
+  return { statusCode, body, headers };
+};
